@@ -1,0 +1,149 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'        # Tagged releases (v0.1.0, v1.0.0, etc.)
+    branches:
+      - main        # Pre-release on every commit to main
+
+permissions:
+  contents: write
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.1.0+$(date -u +%Y%m%d%H%M%S)-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: check-version
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            ext: tar.gz
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            ext: tar.gz
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            ext: zip
+          - os: windows-latest
+            goos: windows
+            goarch: arm64
+            ext: zip
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            ext: tar.gz
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            ext: tar.gz
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          check-latest: true
+
+      - name: Build
+        id: build
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          BINARY="pixpack_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}"
+          if [ "${{ matrix.goos }}" = "windows" ]; then BINARY="${BINARY}.exe"; fi
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -ldflags="-s -w" -o "$BINARY" ./cmd/pixpack
+          echo "binary=$BINARY" >> "$GITHUB_OUTPUT"
+
+      - name: Package (tar.gz)
+        if: matrix.ext == 'tar.gz'
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          ARCHIVE="pixpack_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.tar.gz"
+          tar czf "$ARCHIVE" "${{ steps.build.outputs.binary }}"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Package (zip)
+        if: matrix.ext == 'zip'
+        shell: bash
+        run: |
+          VERSION="${{ needs.check-version.outputs.version }}"
+          ARCHIVE="pixpack_${VERSION}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          7z a -tzip "$ARCHIVE" "${{ steps.build.outputs.binary }}" || zip "$ARCHIVE" "${{ steps.build.outputs.binary }}"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Generate Checksums
+        shell: bash
+        run: |
+          sha256sum "${{ steps.build.outputs.archive }}" > "${{ steps.build.outputs.archive }}.sha256"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixpack-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            ${{ steps.build.outputs.archive }}
+            ${{ steps.build.outputs.archive }}.sha256
+
+  create-release:
+    needs: [check-version, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pixpack-*
+          merge-multiple: true
+
+      - name: Generate Release Body
+        id: body
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Extract changelog for this version
+            cat CHANGELOG.md > release_body.md
+          else
+            echo "## Pre-release Build" > release_body.md
+            echo "" >> release_body.md
+            echo "This is an automated pre-release from commit [\`${{ github.sha }}\`](https://github.com/DraxonV1/PixPack/commit/${{ github.sha }})." >> release_body.md
+            echo "" >> release_body.md
+            echo "### Changes in this build" >> release_body.md
+            echo "" >> release_body.md
+            git log --oneline --no-decorate \${{ github.event.before }}..\${{ github.sha }} 2>/dev/null | sed 's/^/- /' >> release_body.md || echo "- Initial commit" >> release_body.md
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_type == 'tag' && github.ref_name || format('Pre-release {0}', needs.check-version.outputs.version) }}
+          body_path: release_body.md
+          draft: ${{ github.ref_type != 'tag' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          files: |
+            *.tar.gz
+            *.zip
+            *.sha256

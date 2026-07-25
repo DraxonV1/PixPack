@@ -1,0 +1,22 @@
+# Binaries
+pixpack
+pixpack.exe
+*.test
+*.prof
+
+# Output files
+*.png
+restored-*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies
+vendor/
