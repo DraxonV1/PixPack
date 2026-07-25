@@ -20,3 +20,7 @@ Thumbs.db
 
 # Dependencies
 vendor/
+
+# Internal dev files
+PLAN.md
+Test-PixPack.ps1
